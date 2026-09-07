@@ -434,9 +434,19 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
   }, [localStream, isCamOn]);
 
   // WebRTC Peer Connection Factory
-  const createPeerConnection = (targetPeerId) => {
-    if (peerConnections.current[targetPeerId]) {
-      return peerConnections.current[targetPeerId];
+    const createPeerConnection = (targetPeerId) => {
+    if (existingPc && existingPc.connectionState !== 'closed' && existingPc.connectionState !== 'failed') {
+      return existingPc;
+    }
+    if (existingPc) {
+      try { existingPc.close(); } catch (e) {}
+      delete peerConnections.current[targetPeerId];
+      delete iceCandidateQueues.current[targetPeerId];
+      setRemoteStreams((prev) => {
+        const next = { ...prev };
+        delete next[targetPeerId];
+        return next;
+      });
     }
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -499,6 +509,21 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         sendSignal('RTC_ICE', targetPeerId, null, event.candidate);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed') {
+        (async () => {
+          try {
+            pc.restartIce();
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            sendSignal('RTC_OFFER', targetPeerId, { isCamOn: isCamOnRef.current, isMicOn: isMicOnRef.current }, offer);
+          } catch (e) {
+            console.warn('ICE restart failed for', targetPeerId, e);
+          }
+        })();
       }
     };
 
@@ -616,7 +641,7 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
             const isPolite = currentUserId > senderIdentity;
             if (pc.signalingState !== 'stable') {
               if (!isPolite) {
-                console.log('Offer collision detected, impolite peer ignoring offer from:', senderIdentity);
+                setTimeout(() => handleIncomingSignal(data), 250);
                 return;
               }
               await pc.setLocalDescription({ type: 'rollback' });
@@ -923,17 +948,20 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
       // Propagate active video track to all active peer connections via replaceTrack
       if (videoTrack) {
         for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+          if (pc.connectionState === 'closed' || pc.connectionState === 'failed') continue;
           const senders = pc.getSenders();
           const vSender = senders.find((s) => s.track && s.track.kind === 'video');
-          if (vSender) {
-            await vSender.replaceTrack(videoTrack).catch(console.warn);
-          } else {
-            try {
+          try {
+            if (vSender) {
+              await vSender.replaceTrack(videoTrack);
+            } else {
               pc.addTrack(videoTrack, localStreamRef.current);
-              const offer = await pc.createOffer();
-              await pc.setLocalDescription(offer);
-              sendSignal('RTC_OFFER', peerId, { isCamOn: true, isMicOn: isMicOnRef.current }, offer);
-            } catch (e) {}
+            }
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendSignal('RTC_OFFER', peerId, { isCamOn: true, isMicOn: isMicOnRef.current }, offer);
+          } catch (e) {
+            console.warn('Renegotiation error enabling camera for peer:', peerId, e);
           }
         }
       }
