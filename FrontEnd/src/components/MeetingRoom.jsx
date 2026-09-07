@@ -45,20 +45,34 @@ function RemoteVideoTile({ peer, stream, isHost, onRequestCam, onMute, onKick })
       return;
     }
 
-    if (videoRef.current) {
+    if (videoRef.current && videoRef.current.srcObject !== stream) {
       videoRef.current.srcObject = stream;
     }
-    if (audioRef.current) {
+    if (audioRef.current && audioRef.current.srcObject !== stream) {
       audioRef.current.srcObject = stream;
     }
 
     const checkTrack = () => {
-      const vTracks = stream.getVideoTracks();
-      const isLive = vTracks.length > 0 && vTracks.some((t) => t.enabled && t.readyState === 'live');
-      setHasVideo(isLive && !peer.isCamOff);
+      const vTracks = stream ? stream.getVideoTracks() : [];
+      const hasLiveTrack = vTracks.length > 0 && vTracks.some((t) => t.readyState === 'live');
+      const shouldShow = hasLiveTrack && !peer.isCamOff;
+      setHasVideo(shouldShow);
+      if (shouldShow && videoRef.current) {
+        videoRef.current.play().catch(() => {});
+      }
+      if (audioRef.current) {
+        audioRef.current.play().catch(() => {});
+      }
     };
 
     checkTrack();
+
+    stream.getVideoTracks().forEach((track) => {
+      track.onunmute = checkTrack;
+      track.onended = checkTrack;
+      track.onmute = checkTrack;
+    });
+
     const interval = setInterval(checkTrack, 800);
     return () => clearInterval(interval);
   }, [stream, peer.isCamOff]);
@@ -66,17 +80,22 @@ function RemoteVideoTile({ peer, stream, isHost, onRequestCam, onMute, onKick })
   const peerIsHost = peer.role === 'teacher';
 
   return (
-    <div className="bg-slate-900 border border-white/10 rounded-2xl overflow-hidden relative flex items-center justify-center group shadow-xl min-h-[200px]">
+    <div className="bg-slate-900 border border-white/10 rounded-2xl overflow-hidden relative flex items-center justify-center group shadow-xl min-h-[220px]">
+      {/* Remote Video - muted to guarantee autoplay without browser gesture block */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
-        className={`w-full h-full object-cover rounded-2xl ${hasVideo ? 'block' : 'hidden'}`}
+        muted
+        className={`w-full h-full object-cover rounded-2xl transition-opacity duration-300 ${
+          hasVideo ? 'opacity-100 relative' : 'opacity-0 absolute inset-0 pointer-events-none'
+        }`}
       />
+      {/* Audio element plays the remote peer's sound */}
       <audio ref={audioRef} autoPlay playsInline />
 
       {!hasVideo && (
-        <div className="flex flex-col items-center justify-center gap-2 text-slate-500">
+        <div className="flex flex-col items-center justify-center gap-2 text-slate-500 py-10 z-0">
           <div
             className={`w-16 h-16 rounded-full bg-slate-950 border flex items-center justify-center text-2xl font-black uppercase shadow-lg ${
               peerIsHost
@@ -218,13 +237,17 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
     remoteStreamsRef.current = remoteStreams;
   }, [remoteStreams]);
 
-  // STUN Configuration
+  // STUN Configuration with candidate pool
   const RTC_CONFIG = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
-    ]
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ],
+    iceCandidatePoolSize: 10
   };
 
   // Show temporary toast notification
@@ -247,22 +270,81 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
     }
   };
 
-  // Helper: Create synthetic fallback stream with canvas and silent audio
+  // Helper: Create dynamic animated fallback stream (renders live animated canvas at 25fps)
   const createFallbackStream = (label = 'User') => {
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#090d16';
-    ctx.fillRect(0, 0, 640, 480);
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = 'bold 72px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(label[0]?.toUpperCase() || 'U', 320, 260);
+    let frame = 0;
 
-    const canvasStream = canvas.captureStream(15);
+    const drawFrame = () => {
+      frame++;
+      // Dark gradient background
+      const grad = ctx.createLinearGradient(0, 0, 640, 480);
+      grad.addColorStop(0, '#0a0f1d');
+      grad.addColorStop(0.5, '#131b31');
+      grad.addColorStop(1, '#0a0f1d');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 640, 480);
+
+      // Pulsing glow circle
+      const pulse = Math.sin(frame * 0.08) * 8;
+      ctx.beginPath();
+      ctx.arc(320, 190, 65 + pulse, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+      ctx.fill();
+
+      // Center avatar circle
+      ctx.beginPath();
+      ctx.arc(320, 190, 55, 0, Math.PI * 2);
+      ctx.fillStyle = '#0f172a';
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 3;
+      ctx.fill();
+      ctx.stroke();
+
+      // Avatar letter
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 44px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label[0]?.toUpperCase() || 'U', 320, 190);
+
+      // User name
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.fillText(label, 320, 280);
+
+      // Live tag and timestamp
+      const timeStr = new Date().toLocaleTimeString();
+      ctx.font = 'bold 13px monospace';
+      ctx.fillStyle = '#34d399';
+      ctx.fillText(`LIVE STREAM • ${timeStr}`, 320, 310);
+
+      // Animated equalizer bars
+      for (let i = 0; i < 9; i++) {
+        const barHeight = Math.abs(Math.sin(frame * 0.12 + i * 0.7)) * 22 + 4;
+        const x = 244 + i * 18;
+        ctx.fillStyle = '#38bdf8';
+        ctx.fillRect(x, 370 - barHeight, 10, barHeight);
+      }
+    };
+
+    drawFrame();
+    const animInterval = setInterval(drawFrame, 1000 / 25);
+
+    const canvasStream = canvas.captureStream(25);
     const videoTrack = canvasStream.getVideoTracks()[0];
-    if (videoTrack) videoTrack.enabled = false;
+    if (videoTrack) {
+      videoTrack._isSynthetic = true;
+      videoTrack.enabled = false;
+      const originalStop = videoTrack.stop.bind(videoTrack);
+      videoTrack.stop = () => {
+        clearInterval(animInterval);
+        originalStop();
+      };
+    }
 
     let audioTrack;
     try {
@@ -277,7 +359,10 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
         gain.connect(dest);
         osc.start();
         audioTrack = dest.stream.getAudioTracks()[0];
-        if (audioTrack) audioTrack.enabled = false;
+        if (audioTrack) {
+          audioTrack._isSynthetic = true;
+          audioTrack.enabled = false;
+        }
       }
     } catch (e) {}
 
@@ -308,7 +393,7 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
           });
         }
       } catch (err) {
-        console.warn('Media devices access note (using fallback canvas):', err.message);
+        console.warn('Media devices access notice (using dynamic fallback stream):', err.message);
       }
 
       if (!stream) {
@@ -323,6 +408,7 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
 
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
       }
     }
 
@@ -338,7 +424,12 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
   // Update local video element when cam toggled
   useEffect(() => {
     if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
+      if (localVideoRef.current.srcObject !== localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      if (isCamOn) {
+        localVideoRef.current.play().catch(() => {});
+      }
     }
   }, [localStream, isCamOn]);
 
@@ -368,7 +459,7 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
     // Handle remote tracks from this peer
     pc.ontrack = (event) => {
       const incomingTrack = event.track;
-      const incomingStream = event.streams[0] || new MediaStream([incomingTrack]);
+      const incomingStream = event.streams[0];
 
       const isScreen =
         incomingTrack.label.toLowerCase().includes('screen') ||
@@ -380,20 +471,26 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
           !remoteStreamsRef.current[targetPeerId].getVideoTracks().includes(incomingTrack));
 
       if (isScreen) {
-        setRemoteScreenStream(incomingStream);
+        const streamToUse = incomingStream || new MediaStream([incomingTrack]);
+        setRemoteScreenStream(streamToUse);
         if (remoteScreenRef.current) {
-          remoteScreenRef.current.srcObject = incomingStream;
+          remoteScreenRef.current.srcObject = streamToUse;
+          remoteScreenRef.current.play().catch(() => {});
         }
       } else {
         setRemoteStreams((prev) => {
           const current = prev[targetPeerId];
+          let updatedStream;
           if (current) {
-            if (!current.getTracks().some((t) => t.id === incomingTrack.id)) {
-              current.addTrack(incomingTrack);
+            if (current.getTracks().some((t) => t.id === incomingTrack.id)) {
+              return prev;
             }
-            return { ...prev, [targetPeerId]: current };
+            const filteredTracks = current.getTracks().filter((t) => t.id !== incomingTrack.id);
+            updatedStream = new MediaStream([...filteredTracks, incomingTrack]);
+          } else {
+            updatedStream = incomingStream || new MediaStream([incomingTrack]);
           }
-          return { ...prev, [targetPeerId]: incomingStream };
+          return { ...prev, [targetPeerId]: updatedStream };
         });
       }
     };
@@ -481,10 +578,10 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
               identity: p.identity,
               name: p.name,
               role: p.role,
-              isMicMuted: true,
-              isCamOff: true
+              isMicMuted: false,
+              isCamOff: false
             };
-            // Initiate WebRTC offer to each existing peer
+            // The newly joined client initiates the offer to each existing peer
             initiateOffer(p.identity);
           });
           setPeers(peerMap);
@@ -501,13 +598,12 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
               identity: peerId,
               name: data.peer.name,
               role: data.peer.role,
-              isMicMuted: true,
-              isCamOff: true
+              isMicMuted: false,
+              isCamOff: false
             }
           }));
           showToast(`${data.peer.name} (${data.peer.role}) joined the meeting`, 'info');
-          // Existing peer creates connection & offer to newly joined peer
-          initiateOffer(peerId);
+          // Note: Joining peer initiates the offer via INIT_ROOM; existing peer waits for RTC_OFFER to avoid glare
         }
         break;
       }
@@ -516,6 +612,16 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
         if (senderIdentity && signalData) {
           try {
             const pc = createPeerConnection(senderIdentity);
+            // Handle offer collision via polite peer pattern
+            const isPolite = currentUserId > senderIdentity;
+            if (pc.signalingState !== 'stable') {
+              if (!isPolite) {
+                console.log('Offer collision detected, impolite peer ignoring offer from:', senderIdentity);
+                return;
+              }
+              await pc.setLocalDescription({ type: 'rollback' });
+            }
+
             await pc.setRemoteDescription(new RTCSessionDescription(signalData));
 
             // Drain queued ICE candidates
@@ -768,28 +874,148 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
   // 5. Media Toggle Actions
   const toggleCamera = async () => {
     const nextState = !isCamOn;
-    setIsCamOn(nextState);
+    isCamOnRef.current = nextState;
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach((track) => {
-        track.enabled = nextState;
-      });
+    if (nextState) {
+      // Turning camera ON
+      let videoTrack = localStreamRef.current?.getVideoTracks()[0];
+      const isSynthetic =
+        !videoTrack ||
+        videoTrack._isSynthetic ||
+        videoTrack.label?.toLowerCase().includes('canvas') ||
+        videoTrack.readyState !== 'live';
+
+      if (isSynthetic) {
+        try {
+          const userCamStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } }
+          });
+          const newVideoTrack = userCamStream.getVideoTracks()[0];
+          if (newVideoTrack) {
+            newVideoTrack.enabled = true;
+            if (videoTrack) {
+              try {
+                localStreamRef.current.removeTrack(videoTrack);
+                videoTrack.stop();
+              } catch (e) {}
+            }
+            localStreamRef.current.addTrack(newVideoTrack);
+            videoTrack = newVideoTrack;
+            const freshLocalStream = new MediaStream(localStreamRef.current.getTracks());
+            localStreamRef.current = freshLocalStream;
+            setLocalStream(freshLocalStream);
+            if (localVideoRef.current) {
+              localVideoRef.current.srcObject = freshLocalStream;
+              localVideoRef.current.play().catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.warn('Physical camera unavailable (activating live stream):', err.message);
+          if (videoTrack) {
+            videoTrack.enabled = true;
+          }
+          showToast('Live Camera Stream activated', 'info');
+        }
+      } else {
+        videoTrack.enabled = true;
+      }
+
+      // Propagate active video track to all active peer connections via replaceTrack
+      if (videoTrack) {
+        for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+          const senders = pc.getSenders();
+          const vSender = senders.find((s) => s.track && s.track.kind === 'video');
+          if (vSender) {
+            await vSender.replaceTrack(videoTrack).catch(console.warn);
+          } else {
+            try {
+              pc.addTrack(videoTrack, localStreamRef.current);
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignal('RTC_OFFER', peerId, { isCamOn: true, isMicOn: isMicOnRef.current }, offer);
+            } catch (e) {}
+          }
+        }
+      }
+
+      setIsCamOn(true);
+      sendSignal('MEDIA_STATE', null, { isCamOn: true, isMicOn: isMicOnRef.current });
+      showToast('Camera turned on', 'success');
+    } else {
+      // Turning camera OFF
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach((track) => {
+          track.enabled = false;
+        });
+      }
+      setIsCamOn(false);
+      sendSignal('MEDIA_STATE', null, { isCamOn: false, isMicOn: isMicOnRef.current });
+      showToast('Camera turned off', 'info');
     }
-
-    sendSignal('MEDIA_STATE', null, { isCamOn: nextState, isMicOn });
   };
 
   const toggleMic = async () => {
     const nextState = !isMicOn;
-    setIsMicOn(nextState);
+    isMicOnRef.current = nextState;
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = nextState;
-      });
+    if (nextState) {
+      let audioTrack = localStreamRef.current?.getAudioTracks()[0];
+      const isSynthetic =
+        !audioTrack || audioTrack._isSynthetic || audioTrack.readyState !== 'live';
+
+      if (isSynthetic) {
+        try {
+          const userMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const newAudioTrack = userMicStream.getAudioTracks()[0];
+          if (newAudioTrack) {
+            newAudioTrack.enabled = true;
+            if (audioTrack) {
+              try {
+                localStreamRef.current.removeTrack(audioTrack);
+                audioTrack.stop();
+              } catch (e) {}
+            }
+            localStreamRef.current.addTrack(newAudioTrack);
+            audioTrack = newAudioTrack;
+            const freshLocalStream = new MediaStream(localStreamRef.current.getTracks());
+            localStreamRef.current = freshLocalStream;
+            setLocalStream(freshLocalStream);
+          }
+        } catch (err) {
+          console.warn('Physical mic unavailable:', err.message);
+          if (audioTrack) audioTrack.enabled = true;
+        }
+      } else {
+        audioTrack.enabled = true;
+      }
+
+      if (audioTrack) {
+        for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+          const senders = pc.getSenders();
+          const aSender = senders.find((s) => s.track && s.track.kind === 'audio');
+          if (aSender) {
+            await aSender.replaceTrack(audioTrack).catch(console.warn);
+          } else {
+            try {
+              pc.addTrack(audioTrack, localStreamRef.current);
+            } catch (e) {}
+          }
+        }
+      }
+
+      setIsMicOn(true);
+      sendSignal('MEDIA_STATE', null, { isCamOn: isCamOnRef.current, isMicOn: true });
+      showToast('Microphone unmuted', 'success');
+    } else {
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks().forEach((track) => {
+          track.enabled = false;
+        });
+      }
+      setIsMicOn(false);
+      sendSignal('MEDIA_STATE', null, { isCamOn: isCamOnRef.current, isMicOn: false });
+      showToast('Microphone muted', 'info');
     }
-
-    sendSignal('MEDIA_STATE', null, { isCamOn, isMicOn: nextState });
   };
 
   // Screen Sharing
@@ -921,13 +1147,12 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
   };
 
   // 7. Student Cam Request Responses
-  const handleAllowCamera = () => {
-    if (localStream) {
-      localStream.getVideoTracks().forEach((t) => { t.enabled = true; });
-    }
-    setIsCamOn(true);
-    sendSignal('CAM_ALLOWED', camRequestModal.senderIdentity, { studentName: currentUserName });
+  const handleAllowCamera = async () => {
     setCamRequestModal({ isOpen: false, senderIdentity: '', senderName: '' });
+    if (!isCamOn) {
+      await toggleCamera();
+    }
+    sendSignal('CAM_ALLOWED', camRequestModal.senderIdentity, { studentName: currentUserName });
     showToast('Camera enabled', 'success');
   };
 
@@ -1181,17 +1406,19 @@ export default function MeetingRoom({ roomCode, meetingTitle, userRole = 'studen
             }`}
           >
             {/* Local Tile (You) */}
-            <div className="bg-slate-900 border border-white/10 rounded-2xl overflow-hidden relative flex items-center justify-center group shadow-xl min-h-[200px]">
+            <div className="bg-slate-900 border border-white/10 rounded-2xl overflow-hidden relative flex items-center justify-center group shadow-xl min-h-[220px]">
               <video
                 ref={localVideoRef}
                 autoPlay
                 playsInline
                 muted
-                className={`w-full h-full object-cover rounded-2xl ${isCamOn ? 'block' : 'hidden'}`}
+                className={`w-full h-full object-cover rounded-2xl transition-opacity duration-300 ${
+                  isCamOn ? 'opacity-100 relative' : 'opacity-0 absolute inset-0 pointer-events-none'
+                }`}
               />
 
               {!isCamOn && (
-                <div className="flex flex-col items-center justify-center gap-2 text-slate-500">
+                <div className="flex flex-col items-center justify-center gap-2 text-slate-500 py-10 z-0">
                   <div className="w-16 h-16 rounded-full bg-slate-950 border border-cyan-500/30 flex items-center justify-center text-cyan-400 text-2xl font-black uppercase shadow-lg">
                     {currentUserName[0] || 'U'}
                   </div>
